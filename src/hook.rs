@@ -16,13 +16,6 @@ pub fn run(shell: Shell) {
         }
     };
 
-    if names.is_empty() {
-        eprintln!(
-            "reliquary: no secrets configured yet — run `reliquary init` or `reliquary add <NAME>`"
-        );
-        return;
-    }
-
     for name in &names {
         match store::get(name) {
             Ok(Some(value)) => print_export(shell, name, &value),
