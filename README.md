@@ -51,6 +51,7 @@ Open a new terminal and `$GH_TOKEN` is set.
 | `reliquary set NAME`    | Alias for `add`                                                                    |
 | `reliquary list`        | Shows configured secrets and whether each is present in the keyring                |
 | `reliquary remove NAME` | Deletes a secret from both the keyring and the config                              |
+| `reliquary repair`      | One-time: moves secrets stored under the older layout into a single keyring entry (see below) |
 
 A secret's name doubles as its keyring key *and* the environment variable
 it's exported as. `reliquary add GH_TOKEN` always produces `$GH_TOKEN`.
@@ -63,6 +64,25 @@ rc file directly.
 
 The shell hook never breaks your shell: a locked keyring, a missing secret,
 or a dead D-Bus session just prints a warning and moves on.
+
+## One entry, not one per secret
+
+All your secrets live in a single keyring entry. A keyring applies its access
+controls per entry, so a shell that loads twelve secrets from twelve entries
+pays twelve access checks. On macOS each of those is a Keychain dialog, and
+they recur, because the Keychain binds an entry to the code signature of the
+binary that created it and any reinstall changes it. One entry means one check.
+
+`reliquary repair` moves secrets written under the older one-entry-per-secret
+layout into the single entry. Reading them out may prompt once each, one time
+only. It writes the consolidated entry before removing any old one, so an
+interruption leaves both copies rather than neither. Values stay in memory
+throughout and are never written to disk.
+
+Run it once after upgrading. Until you do, secrets are read from wherever
+they still are, so upgrading and repairing can happen in either order and
+neither leaves you without your secrets. `reliquary list` marks anything still
+waiting to be moved.
 
 For how the shell hook actually works, platform-specific keyring notes, and
 building from source, see [CONTRIBUTING.md](CONTRIBUTING.md).

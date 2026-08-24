@@ -21,6 +21,8 @@ pub enum Command {
     Remove { name: String },
     /// List configured secrets and whether they're present in the keyring
     List,
+    /// Recreate every secret so this binary owns its keyring access controls
+    Repair,
     /// Print shell code that exports configured secrets as env vars
     Hook { shell: Shell },
 }

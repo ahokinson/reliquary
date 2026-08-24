@@ -163,13 +163,71 @@ pub fn list() -> Result<()> {
         println!("No secrets configured yet. Run `reliquary add <NAME>` to add one.");
         return Ok(());
     }
+    let secrets = store::load()?;
     for name in &names {
-        let status = match store::get(name)? {
-            Some(_) => "present",
-            None => "MISSING from keyring",
+        let status = if secrets.contains_key(name) {
+            "present"
+        } else if store::load_separate(name)?.is_some() {
+            "present (not yet moved, run `reliquary repair`)"
+        } else {
+            "MISSING from keyring"
         };
         println!("{name}: {status}");
     }
+    Ok(())
+}
+
+/// Moves secrets out of the old one-entry-per-name layout and into the single
+/// entry. The consolidated entry is written before any old one is removed, so a
+/// failure part way through leaves both copies rather than neither.
+pub fn repair() -> Result<()> {
+    let names = config::load()?;
+    if names.is_empty() {
+        println!("No secrets configured yet. Run `reliquary add <NAME>` to add one.");
+        return Ok(());
+    }
+
+    println!(
+        "Reading {} secret(s) from the old per-name entries. Each may prompt \
+         once; that cost is one-time.\n",
+        names.len()
+    );
+
+    let mut secrets = store::load()?;
+    let mut moved = Vec::new();
+
+    for name in &names {
+        print!("{name}: ");
+        io::stdout().flush().ok();
+
+        if secrets.contains_key(name) {
+            println!("already moved");
+            continue;
+        }
+
+        match store::load_separate(name)? {
+            Some(value) => {
+                secrets.insert(name.clone(), value);
+                moved.push(name.clone());
+                println!("read");
+            }
+            None => println!("not found, skipped"),
+        }
+    }
+
+    if moved.is_empty() {
+        println!("\nNothing to move.");
+        return Ok(());
+    }
+
+    store::save(&secrets)?;
+    println!("\nWrote {} secret(s) into a single entry.", moved.len());
+
+    for name in &moved {
+        store::delete_separate(name)?;
+    }
+    println!("Removed the old per-name entries.");
+    println!("\nDone. A shell now reads one entry, so at most one prompt.");
     Ok(())
 }
 

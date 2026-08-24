@@ -13,6 +13,15 @@ Needs a C linker (`cc`/`gcc`) available for `cargo build` to link the
 binary. Most systems already have one; on NixOS it isn't there by default
 and needs adding to your package list.
 
+On macOS it has to be Apple's `cc`. `security-framework` links `-liconv`,
+which exists only as an SDK stub (`libiconv.tbd`), so a GCC earlier on
+`$PATH` fails at link time with `library not found for -liconv`. Either
+drop it from `$PATH` or point rustc at the right one:
+
+```sh
+RUSTFLAGS="-C linker=/usr/bin/cc" cargo build
+```
+
 Install a locally-built binary with `cargo install --path .`.
 
 ## How the shell hook works
@@ -107,10 +116,60 @@ not blocking shell startup.
   `pam_kwallet` unlocks the wallet automatically, so there's no unlock
   prompt in the common case.
 - **macOS**: uses Keychain Services via the `keyring` crate's
-  `apple-native-keyring-store` backend. Untested on real hardware so far
-  (developed on Linux), so this relies on the crate's cross-platform API
-  guarantee (identical `Entry` calls on every platform) rather than direct
-  verification.
+  `apple-native-keyring-store` backend, which talks to the *legacy*
+  file-based Keychain (`SecKeychainAddGenericPassword` /
+  `SecKeychainFindGenericPassword`), not the data-protection keychain.
+  That API gives each new item an access control list trusting only the
+  binary that created it, identified by its code signature — and
+  `SecKeychainAddGenericPassword` takes no access parameter, so the crate
+  offers no way to widen it.
+
+  Any package manager that rebuilds the binary therefore invalidates the
+  grant on every stored secret. Nix assigns a fresh ad-hoc signature per
+  version bump, which produces one Keychain dialog per secret per shell
+  startup. "Always Allow" does not help, because the grant is recorded
+  against a code identity the next upgrade replaces.
+
+  There is no way to widen those controls after the fact, and the record of
+  attempts is worth keeping so nobody repeats them. Editing an existing
+  item's controls needs `ACLAuthorizationChangeACL` and `SecACLSetContents`
+  consumes it once per entry touched, so retrofitting costs a dialog per
+  entry. Worse, `SecKeychainItemSetAccess` returns `errSecAuthFailed`
+  (-25293) regardless: from the creating process, with ChangeACL set to
+  allow every application, and from inside the item's own partition. It
+  cannot be set at creation either. `SecKeychainItemCreateFromContent`
+  takes an `initialAccess`, but since macOS 10.12 securityd stamps an
+  `ACLAuthorizationPartitionID` entry into the new item whatever that
+  argument says. That entry matches on the caller's code signature and is
+  consulted *even when the application list already allows everything*,
+  it holds its data in the entry's description rather than its application
+  list, and for an unsigned build it names a bare cdhash that the next
+  rebuild invalidates. `security add-generic-password -A` hits the same
+  wall from the other side: it stamps `apple-tool:`, so items it writes
+  read back cleanly under `/usr/bin/security` and prompt for everything
+  else.
+
+  So the fix is not to fight the access controls but to stop paying them
+  twelve times over. `store` keeps every secret in one entry, `ACCOUNT`,
+  encoded as length-prefixed records. `hook` reads that entry once and
+  looks up each configured name in memory, so a shell startup costs one
+  access check no matter how many secrets are configured. That leaves at
+  most one dialog per shell on macOS, and none on Linux.
+
+  `reliquary repair` moves secrets out of the older one-entry-per-name
+  layout via `store::load_separate`. It saves the consolidated entry before
+  deleting any old one, so an interruption leaves both copies.
+
+  When measuring any of this, count dialogs from a *different* binary than
+  the one that wrote the entry. A tool reads its own partition without
+  prompting, so testing a write with the same tool that made it always
+  looks clean.
+
+  When checking any of this by hand, read the item back with something
+  other than `/usr/bin/security`. A tool reads its own partition without
+  prompting, so testing `security add-generic-password -A` with
+  `security find-generic-password` passes regardless of whether the
+  partition entry is still there.
 
 ## Testing the shell hook end-to-end
 

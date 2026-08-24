@@ -35,6 +35,7 @@ fn run() -> Result<()> {
         Command::Add { name } => commands::add(&name)?,
         Command::Remove { name } => commands::remove(&name)?,
         Command::List => commands::list()?,
+        Command::Repair => commands::repair()?,
         Command::Hook { shell } => hook::run(shell),
     }
     Ok(())

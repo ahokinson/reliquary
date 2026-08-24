@@ -16,8 +16,22 @@ pub fn run(shell: Shell) {
         }
     };
 
+    let secrets = match store::load() {
+        Ok(secrets) => secrets,
+        Err(e) => {
+            eprintln!("reliquary: warning: {e:#}");
+            return;
+        }
+    };
+
     for name in &names {
-        match store::get(name) {
+        if let Some(value) = secrets.get(name) {
+            print_export(shell, name, value);
+            continue;
+        }
+        // Falls back to the pre-consolidation layout so that upgrading and
+        // running `reliquary repair` can happen in either order.
+        match store::load_separate(name) {
             Ok(Some(value)) => print_export(shell, name, &value),
             Ok(None) => eprintln!(
                 "reliquary: warning: secret \"{name}\" is configured but not found in the OS keyring (run: reliquary add {name})"
