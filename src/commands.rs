@@ -167,7 +167,7 @@ pub fn list() -> Result<()> {
     for name in &names {
         let status = if secrets.contains_key(name) {
             "present"
-        } else if store::load_separate(name)?.is_some() {
+        } else if store::read(name)?.is_some() {
             "present (not yet moved, run `reliquary repair`)"
         } else {
             "MISSING from keyring"
@@ -193,38 +193,39 @@ pub fn repair() -> Result<()> {
         names.len()
     );
 
-    let mut secrets = store::load()?;
     let mut moved = Vec::new();
 
-    for name in &names {
-        print!("{name}: ");
-        io::stdout().flush().ok();
+    store::update(|secrets| {
+        for name in &names {
+            print!("{name}: ");
+            io::stdout().flush().ok();
 
-        if secrets.contains_key(name) {
-            println!("already moved");
-            continue;
-        }
-
-        match store::load_separate(name)? {
-            Some(value) => {
-                secrets.insert(name.clone(), value);
-                moved.push(name.clone());
-                println!("read");
+            if secrets.contains_key(name) {
+                println!("already moved");
+                continue;
             }
-            None => println!("not found, skipped"),
+
+            match store::read(name)? {
+                Some(value) => {
+                    secrets.insert(name.clone(), value);
+                    moved.push(name.clone());
+                    println!("read");
+                }
+                None => println!("not found, skipped"),
+            }
         }
-    }
+        Ok(())
+    })?;
 
     if moved.is_empty() {
         println!("\nNothing to move.");
         return Ok(());
     }
 
-    store::save(&secrets)?;
     println!("\nWrote {} secret(s) into a single entry.", moved.len());
 
     for name in &moved {
-        store::delete_separate(name)?;
+        store::clear(name)?;
     }
     println!("Removed the old per-name entries.");
     println!("\nDone. A shell now reads one entry, so at most one prompt.");

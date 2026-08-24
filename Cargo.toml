@@ -1,6 +1,6 @@
 [package]
 name = "reliquary"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 
 [dependencies]
@@ -11,3 +11,8 @@ libc = "0.2.189"
 rpassword = "7.5.4"
 shlex = "2.0.1"
 zeroize = "1.9.0"
+
+# Only to write an entry through the handle an earlier read returned; keyring
+# has no way to express that, and looking the entry up again costs a dialog.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.7"

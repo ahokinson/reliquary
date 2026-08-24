@@ -156,9 +156,21 @@ not blocking shell startup.
   access check no matter how many secrets are configured. That leaves at
   most one dialog per shell on macOS, and none on Linux.
 
+  A dialog is charged per *lookup*, so `store::update` reads once and writes
+  back through the handle that read returned, via `security-framework`. Going
+  through `keyring`'s `set_password` instead would look the entry up again and
+  cost a second one. Only the Decrypt authorization is ever charged: Encrypt is
+  open to any application, so modifying and creating are both free, and
+  measurement bears that out. Note the dialog appears even for the binary that
+  created the entry and is named in its own access controls, which is why
+  taking ownership by rewriting the entry buys nothing: an ad-hoc-signed
+  binary trips `kSecKeychainPromptInvalid` regardless. That is the same reason
+  "Always Allow" never sticks.
+
   `reliquary repair` moves secrets out of the older one-entry-per-name
-  layout via `store::load_separate`. It saves the consolidated entry before
-  deleting any old one, so an interruption leaves both copies.
+  layout, where each secret's name was its own account. It saves the
+  consolidated entry before deleting any old one, so an interruption leaves
+  both copies.
 
   When measuring any of this, count dialogs from a *different* binary than
   the one that wrote the entry. A tool reads its own partition without

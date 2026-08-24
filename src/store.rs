@@ -21,62 +21,144 @@ fn entry(account: &str) -> Result<Entry> {
 
 /// An empty map means nothing has been stored yet, not an error.
 pub fn load() -> Result<Secrets> {
-    let blob = match entry(ACCOUNT)?.get_password() {
-        Ok(blob) => Secret::new(blob),
-        Err(keyring::Error::NoEntry) => return Ok(Secrets::new()),
-        Err(keyring::Error::Ambiguous(_)) => bail!(
-            "multiple keyring entries match \"{SERVICE}\" — resolve the duplicate via your keyring GUI"
-        ),
-        Err(e) => return Err(e).context("reading the keyring"),
-    };
-    decode(&blob)
+    let (blob, _) = platform::open()?;
+    match blob {
+        Some(blob) => decode(&blob),
+        None => Ok(Secrets::new()),
+    }
 }
 
-pub fn save(secrets: &Secrets) -> Result<()> {
+/// Reads the entry, applies a change, and writes it back through the handle the
+/// read produced. Looking the entry up a second time in order to write it would
+/// decrypt it a second time, and on macOS every decrypt is a Keychain dialog.
+pub fn update(change: impl FnOnce(&mut Secrets) -> Result<()>) -> Result<()> {
+    let (blob, handle) = platform::open()?;
+    let mut secrets = match blob {
+        Some(blob) => decode(&blob)?,
+        None => Secrets::new(),
+    };
+
+    change(&mut secrets)?;
+
     if secrets.is_empty() {
-        return clear();
+        return platform::remove(handle);
     }
-    let blob = Secret::new(encode(secrets));
-    entry(ACCOUNT)?
-        .set_password(&blob)
-        .context("writing to the keyring")
+    platform::write(handle, &Secret::new(encode(&secrets)))
 }
 
 pub fn set(name: &str, value: &str) -> Result<()> {
-    let mut secrets = load()?;
-    secrets.insert(name.to_string(), Secret::new(value.to_string()));
-    save(&secrets)
+    let name = name.to_string();
+    let value = Secret::new(value.to_string());
+    update(move |secrets| {
+        secrets.insert(name, value);
+        Ok(())
+    })
 }
 
 /// Treats "already absent" as success.
 pub fn delete(name: &str) -> Result<()> {
-    let mut secrets = load()?;
-    if secrets.remove(name).is_none() {
-        return Ok(());
-    }
-    save(&secrets)
+    update(|secrets| {
+        secrets.remove(name);
+        Ok(())
+    })
 }
 
-fn clear() -> Result<()> {
-    match entry(ACCOUNT)?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(e).context("deleting the keyring entry"),
-    }
-}
-
-/// Reads a secret stored under the old one-entry-per-name layout.
-pub fn load_separate(name: &str) -> Result<Option<Secret>> {
-    match entry(name)?.get_password() {
-        Ok(value) => Ok(Some(Secret::new(value))),
+/// The old layout gave each secret its own entry, keyed by the secret's name,
+/// so callers migrating from it pass a name as the account.
+pub fn read(account: &str) -> Result<Option<Secret>> {
+    match entry(account)?.get_password() {
+        Ok(blob) => Ok(Some(Secret::new(blob))),
         Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(e).with_context(|| format!("reading \"{name}\" from the keyring")),
+        Err(keyring::Error::Ambiguous(_)) => bail!(
+            "multiple keyring entries match \"{SERVICE}\" — resolve the duplicate via your keyring GUI"
+        ),
+        Err(e) => Err(e).with_context(|| format!("reading \"{account}\" from the keyring")),
     }
 }
 
-pub fn delete_separate(name: &str) -> Result<()> {
-    match entry(name)?.delete_credential() {
+pub fn clear(account: &str) -> Result<()> {
+    match entry(account)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(e).with_context(|| format!("deleting \"{name}\" from the keyring")),
+        Err(e) => Err(e).with_context(|| format!("deleting \"{account}\" from the keyring")),
+    }
+}
+
+/// Writing through a handle from an earlier read is a macOS concern: its
+/// keyring charges an authorization per lookup. Elsewhere `keyring`'s own write
+/// is fine, so the handle is nothing.
+#[cfg(not(target_os = "macos"))]
+mod platform {
+    use anyhow::{Context, Result};
+
+    use super::{ACCOUNT, Secret, clear, entry, read};
+
+    pub struct Handle;
+
+    pub fn open() -> Result<(Option<Secret>, Handle)> {
+        Ok((read(ACCOUNT)?, Handle))
+    }
+
+    pub fn write(_handle: Handle, blob: &str) -> Result<()> {
+        entry(ACCOUNT)?
+            .set_password(blob)
+            .context("writing to the keyring")
+    }
+
+    pub fn remove(_handle: Handle) -> Result<()> {
+        clear(ACCOUNT)
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod platform {
+    use anyhow::{Context, Result};
+    use security_framework::os::macos::keychain_item::SecKeychainItem;
+    use security_framework::os::macos::passwords::find_generic_password;
+
+    use super::{ACCOUNT, SERVICE, Secret, clear, entry};
+
+    const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+
+    /// `None` when the entry does not exist yet, so there is nothing to modify.
+    pub struct Handle(Option<SecKeychainItem>);
+
+    pub fn open() -> Result<(Option<Secret>, Handle)> {
+        match find_generic_password(None, SERVICE, ACCOUNT) {
+            Ok((password, item)) => {
+                let blob = String::from_utf8(password.to_vec())
+                    .context("keyring contents are not valid UTF-8")?;
+                Ok((Some(Secret::new(blob)), Handle(Some(item))))
+            }
+            Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok((None, Handle(None))),
+            Err(e) => Err(e).context("reading the keyring"),
+        }
+    }
+
+    /// Modifying through the handle needs only the Encrypt authorization, which
+    /// costs no dialog. Creating an entry costs none either, so the missing-item
+    /// case can go through `keyring`.
+    pub fn write(handle: Handle, blob: &str) -> Result<()> {
+        match handle.0 {
+            Some(mut item) => item
+                .set_password(blob.as_bytes())
+                .context("writing to the keyring"),
+            None => {
+                entry(ACCOUNT)?
+                    .set_password(blob)
+                    .context("creating the keyring entry")?;
+                Ok(())
+            }
+        }
+    }
+
+    pub fn remove(handle: Handle) -> Result<()> {
+        match handle.0 {
+            Some(item) => {
+                item.delete();
+                Ok(())
+            }
+            None => clear(ACCOUNT),
+        }
     }
 }
 

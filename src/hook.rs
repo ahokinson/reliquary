@@ -31,7 +31,7 @@ pub fn run(shell: Shell) {
         }
         // Falls back to the pre-consolidation layout so that upgrading and
         // running `reliquary repair` can happen in either order.
-        match store::load_separate(name) {
+        match store::read(name) {
             Ok(Some(value)) => print_export(shell, name, &value),
             Ok(None) => eprintln!(
                 "reliquary: warning: secret \"{name}\" is configured but not found in the OS keyring (run: reliquary add {name})"
